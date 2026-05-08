@@ -1,0 +1,39 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <TargetFramework>net8.0</TargetFramework>
+    <AssemblyName>Aras.OAuth.Server.Plugins.MicrosoftEntra</AssemblyName>
+    <RootNamespace>Aras.OAuth.Server.Plugins.MicrosoftEntra</RootNamespace>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Version>1.0.0.0</Version>
+    <Company>Robotics Centre</Company>
+    <Product>Aras Innovator RC Customizations</Product>
+    <!-- Don't pull in transitive deps; we use what Aras ships -->
+    <DisableImplicitFrameworkReferences>false</DisableImplicitFrameworkReferences>
+  </PropertyGroup>
+  <ItemGroup>
+    <FrameworkReference Include="Microsoft.AspNetCore.App" />
+  </ItemGroup>
+  <ItemGroup>
+    <Reference Include="Aras.Plugins.Infrastructure">
+      <HintPath>refs\Aras.Plugins.Infrastructure.dll</HintPath>
+      <Private>false</Private>
+    </Reference>
+    <Reference Include="Aras.OAuth.Server.Infrastructure">
+      <HintPath>refs\Aras.OAuth.Server.Infrastructure.dll</HintPath>
+      <Private>false</Private>
+    </Reference>
+    <Reference Include="Microsoft.AspNetCore.Authentication.OpenIdConnect">
+      <HintPath>refs\Microsoft.AspNetCore.Authentication.OpenIdConnect.dll</HintPath>
+      <Private>false</Private>
+    </Reference>
+    <Reference Include="Microsoft.IdentityModel.Tokens">
+      <HintPath>refs\Microsoft.IdentityModel.Tokens.dll</HintPath>
+      <Private>false</Private>
+    </Reference>
+    <Reference Include="Microsoft.IdentityModel.Protocols.OpenIdConnect">
+      <HintPath>refs\Microsoft.IdentityModel.Protocols.OpenIdConnect.dll</HintPath>
+      <Private>false</Private>
+    </Reference>
+  </ItemGroup>
+</Project>

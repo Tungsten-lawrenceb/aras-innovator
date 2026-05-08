@@ -1,0 +1,15 @@
+﻿{
+    "InnovatorClient.Plugins":  [
+                                    {
+                                        "Name":  "Aras.Plugins.DataProtectionKeysFileSystemStorage",
+                                        "Enabled":  true,
+                                        "Options":  {
+                                                        "KeysDirectoryPath":  "./App_Data"
+                                                    }
+                                    },
+                                    {
+                                        "Name":  "Aras.Plugins.ForwardedHeaders",
+                                        "Enabled":  true
+                                    }
+                                ]
+}

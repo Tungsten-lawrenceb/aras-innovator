@@ -1,0 +1,66 @@
+﻿{
+    "OAuthServer.Plugins":  [
+                                {
+                                    "Name":  "Aras.OAuth.Server.Plugins.SqliteStorage",
+                                    "Enabled":  true,
+                                    "Options":  {
+                                                    "ConnectionString":  "Data Source=App_Data\\OAuthServer.sqlite",
+                                                    "EnableTokenCleanup":  true,
+                                                    "TokenCleanupInterval":  3600
+                                                }
+                                },
+                                {
+                                    "Name":  "Aras.Plugins.DataProtectionKeysFileSystemStorage",
+                                    "Enabled":  true,
+                                    "Options":  {
+                                                    "KeysDirectoryPath":  "./App_Data"
+                                                }
+                                },
+                                {
+                                    "Name":  "Aras.OAuth.Server.Plugins.CustomProtocol",
+                                    "Enabled":  false
+                                },
+                                {
+                                    "Name":  "Aras.OAuth.Server.Plugins.WindowsAuthentication",
+                                    "Enabled":  false,
+                                    "Options":  {
+                                                    "AuthenticationType":  "WindowsRemote",
+                                                    "DisplayName":  "Windows"
+                                                }
+                                },
+                                {
+                                    "Name":  "Aras.OAuth.Server.Plugins.WindowsUserByNameClaimMapper",
+                                    "Enabled":  false,
+                                    "Options":  {
+                                                    "AuthenticationType":  "WindowsRemote",
+                                                    "AllowedDomainNames":  ".*",
+                                                    "AllowedDomainUsers":  ".+",
+                                                    "DeniedDomainUsers":  "^admin$|^root$|^vadmin$|^authadmin$|^esadmin$"
+                                                }
+                                },
+                                {
+                                    "Name":  "Aras.Plugins.ForwardedHeaders",
+                                    "Enabled":  true
+                                },
+                                {
+                                    "Name":  "Aras.OAuth.Server.Plugins.ExternalUserByServerMethodMapper",
+                                    "Enabled":  true,
+                                    "Options":  {
+                                                    "AllowedDomainNames":  ".*",
+                                                    "AllowedDomainUsers":  ".+",
+                                                    "DeniedDomainUsers":  ""
+                                                }
+                                },
+                                {
+                                    "Name":  "Aras.OAuth.Server.Plugins.MicrosoftEntra",
+                                    "Enabled":  true,
+                                    "Options":  {
+                                                    "AuthenticationType":  "Microsoft",
+                                                    "DisplayName":  "Sign in with Microsoft",
+                                                    "TenantId":  "a087e2e8-b1d2-42d4-a7b4-7bb41022e8ef",
+                                                    "ClientId":  "0a3167af-50ed-4a76-95aa-4429a20d6ba6",
+                                                    "ClientSecret":  "<<ENTRA_CLIENT_SECRET>>"
+                                                }
+                                }
+                            ]
+}

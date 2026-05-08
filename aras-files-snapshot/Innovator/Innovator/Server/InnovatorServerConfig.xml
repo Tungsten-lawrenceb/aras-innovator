@@ -1,0 +1,18 @@
+﻿<?xml version="1.0" encoding="UTF-8"?>
+<Innovator>
+  <UI-Tailoring product_name="RC PLM" />
+  <operating_parameter key="debug_log_flag" value="false" />
+  <operating_parameter key="debug_log_limit" value="10000" />
+  <operating_parameter key="debug_log_pretty" value="true" />
+  <operating_parameter key="xslt_processor_debug" value="false" />
+  <License lic_type="Unlimited" lic_key="0ed85abe3420bd3f10ef64880182f714" act_key="8CCD755D46064175B5AB165EFE82520C" company="Triage - Andover" />
+  <Mail SMTPServer="queue" />
+  <operating_parameter key="temp_folder" value="" />
+  <operating_parameter key="ServerMethodTempDir" value="" />
+  <operating_parameter key="IsTelemetryEnable" value="true" />
+  <AgentService InnovatorToServiceAddress="" />
+  <OAuthServerDiscovery>
+    <Urls><Url value="https://obliged-travesty-sacrament.ngrok-free.dev/InnovatorServer/OAuthServer/" /><Url value="http://192.168.1.104/InnovatorServer/OAuthServer/" /><Url value="http://ARAS-WIN22K2/InnovatorServer/OAuthServer/" /><Url value="http://localhost/InnovatorServer/OAuthServer/" /></Urls>
+  </OAuthServerDiscovery>
+  <DB-Connection id="InnovatorSolutions" database="InnovatorSolutions" server="localhost\SQLEXPRESS" regular_uid="innovator_regular" regular_pwd="<<DB_PASSWORD>>" dbo_uid="innovator" dbo_pwd="<<DB_PASSWORD>>" />
+</Innovator>

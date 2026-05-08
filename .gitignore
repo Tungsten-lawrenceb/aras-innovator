@@ -1,0 +1,15 @@
+# Build artifacts
+**/bin/Debug/
+**/bin/Release/
+**/obj/
+**/publish/
+*.bak
+*.pre*.bak
+
+# Local files
+.DS_Store
+Thumbs.db
+
+# Aras Update / install download artifacts
+*.msi
+*.zip

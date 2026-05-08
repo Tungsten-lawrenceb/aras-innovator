@@ -1,0 +1,23 @@
+{
+  "runtimeTarget": {
+    "name": ".NETCoreApp,Version=v8.0",
+    "signature": ""
+  },
+  "compilationOptions": {},
+  "targets": {
+    ".NETCoreApp,Version=v8.0": {
+      "Aras.OAuth.Server.Plugins.MicrosoftEntra/1.0.0.0": {
+        "runtime": {
+          "Aras.OAuth.Server.Plugins.MicrosoftEntra.dll": {}
+        }
+      }
+    }
+  },
+  "libraries": {
+    "Aras.OAuth.Server.Plugins.MicrosoftEntra/1.0.0.0": {
+      "type": "project",
+      "serviceable": false,
+      "sha512": ""
+    }
+  }
+}
