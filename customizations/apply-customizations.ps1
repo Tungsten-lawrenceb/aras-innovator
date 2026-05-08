@@ -958,6 +958,27 @@ if ($EntraTenantId -and $EntraClientId) {
             $conn.Dispose()
         }
     }
+
+    # 6d.4 Bootstrap the AutoMemberIdentities Variable
+    # The af_ValidateAndMapExternalUser method (above) reads this Variable on every
+    # auto-create to decide which Aras Identities new SSO users join. Why a Variable
+    # and not a plugin Option: the shipped Aras.OAuth.Server.Plugins.ExternalUserByServerMethodMapper.dll
+    # only forwards three specific Options (AllowedDomainNames, AllowedDomainUsers,
+    # DeniedDomainUsers) to the Method - arbitrary Options are NOT plumbed through
+    # (verified via Cecil decompilation by codex review). A DB Variable is the
+    # next-cleanest knob; operators can edit it via the Aras admin UI without
+    # rebuilding the Method.
+    #
+    # Default value "Aras PLM" preserves the original behavior. Examples in the
+    # Method's source comments.
+    $varSetter = Join-Path $PSScriptRoot 'set-variable.ps1'
+    if (Test-Path $varSetter) {
+        Write-Host ""
+        Write-Host "== AutoMemberIdentities Variable (default: 'Aras PLM') =="
+        & powershell -ExecutionPolicy Bypass -File $varSetter `
+            -Server $SqlServer -Database $SqlDatabase -DbUser $SqlUser -DbPassword $SqlPassword `
+            -Name 'AutoMemberIdentities' -Value 'Aras PLM' 2>&1 | ForEach-Object { Write-Host "  $_" }
+    }
 }
 
 # ---------------------------------------------------------------- 6e. Strip Aras.ExternalAuthentication license filter

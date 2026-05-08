@@ -214,31 +214,114 @@ internal Item AutoCreateMicrosoftUser(Innovator inn, string email, string upn, s
 			}
 		}
 
-		// Add to "Aras PLM" identity (default general-user group in Aras 2025).
-		// Admins can promote later via the Aras admin UI. Failure here is loud:
-		// silently leaving a user with no group membership produced symptoms that
-		// were hard to debug in earlier iterations (see codex review notes).
+		// Add to a configurable list of Aras Identities. The list is read from an
+		// Aras Variable named "AutoMemberIdentities" (looked up on every auto-create
+		// so operator changes take effect without rebuilding the Method). Format:
+		// comma-separated Identity names. Missing / empty -> default "Aras PLM".
+		//
+		// Why a Variable and not a plugin Option: the shipped
+		// ExternalUserByServerMethodMapper.dll only forwards three specific Options
+		// (AllowedDomainNames, AllowedDomainUsers, DeniedDomainUsers) as snake_case
+		// properties; arbitrary Options are NOT plumbed through to the invoked
+		// Method (verified via Cecil decompilation by codex review).
+		//
+		// To change membership defaults: edit the Variable via the Aras admin UI
+		// (TOC -> Administration -> Variables) or run set-variable.ps1.
+		//
+		// Value examples:
+		//   "Aras PLM"                    -> default, basic user
+		//   "Aras PLM,Innovator Admin"    -> every new SSO user is also an admin
+		//   "Aras PLM,All Employees"      -> org-wide users group
+		//
+		// Failure model:
+		//   - missing alias Identity     -> hard throw (would leave unusable user)
+		//   - typo'd / missing Identity  -> soft fail per identity, continue
+		//   - Member.add failure         -> soft fail per identity, continue
+		//   - already a member           -> idempotent skip (counts as success)
+		//   - no identity succeeded      -> hard throw at end
 		if (string.IsNullOrEmpty(aliasIdentityId))
 		{
 			throw new Aras.Server.Core.InnovatorServerException(
-				"Auto-created user '" + loginName + "' has no alias Identity row — refusing to leave it without group membership.");
+				"Auto-created user '" + loginName + "' has no alias Identity row - refusing to leave it without group membership.");
 		}
-		Item idQ = inn.newItem("Identity", "get");
-		idQ.setProperty("name", "Aras PLM");
-		Item idR = idQ.apply();
-		if (idR.isError() || idR.getItemCount() != 1)
+
+		// Read AutoMemberIdentities Variable from the Innovator DB.
+		string memberConfig = null;
+		Item varQ = inn.newItem("Variable", "get");
+		varQ.setProperty("name", "AutoMemberIdentities");
+		varQ.setAttribute("select", "value");
+		Item varR = varQ.apply();
+		if (!varR.isError() && varR.getItemCount() == 1)
 		{
-			throw new Aras.Server.Core.InnovatorServerException(
-				"Default identity 'Aras PLM' not found — auto-created user '" + loginName + "' has no group membership and would be unusable. Create that identity (or change the default in af_ValidateAndMapExternalUser) and retry.");
+			memberConfig = varR.getProperty("value");
 		}
-		Item member = inn.newItem("Member", "add");
-		member.setProperty("source_id", idR.getID());
-		member.setProperty("related_id", aliasIdentityId);
-		Item memberResult = member.apply();
-		if (memberResult.isError())
+
+		System.Collections.Generic.List<string> memberIdentities = new System.Collections.Generic.List<string>();
+		if (string.IsNullOrEmpty(memberConfig))
 		{
+			memberIdentities.Add("Aras PLM");
+		}
+		else
+		{
+			foreach (string raw in memberConfig.Split(','))
+			{
+				string trimmed = raw.Trim();
+				if (!string.IsNullOrEmpty(trimmed)) { memberIdentities.Add(trimmed); }
+			}
+			if (memberIdentities.Count == 0)
+			{
+				memberIdentities.Add("Aras PLM");
+			}
+		}
+
+		int successCount = 0;
+		System.Collections.Generic.List<string> failures = new System.Collections.Generic.List<string>();
+
+		foreach (string identityName in memberIdentities)
+		{
+			// 1. Resolve Identity by name
+			Item idQ = inn.newItem("Identity", "get");
+			idQ.setProperty("name", identityName);
+			Item idR = idQ.apply();
+			if (idR.isError() || idR.getItemCount() != 1)
+			{
+				failures.Add("identity '" + identityName + "' not found");
+				continue;
+			}
+			string sourceId = idR.getID();
+
+			// 2. Idempotency: skip if user is already a Member
+			Item exQ = inn.newItem("Member", "get");
+			exQ.setProperty("source_id", sourceId);
+			exQ.setProperty("related_id", aliasIdentityId);
+			Item exR = exQ.apply();
+			if (!exR.isError() && exR.getItemCount() > 0)
+			{
+				successCount++;
+				continue;
+			}
+
+			// 3. Add the Member relationship
+			Item member = inn.newItem("Member", "add");
+			member.setProperty("source_id", sourceId);
+			member.setProperty("related_id", aliasIdentityId);
+			Item memberResult = member.apply();
+			if (memberResult.isError())
+			{
+				failures.Add("'" + identityName + "' Member.add failed: " + memberResult.getErrorString());
+				continue;
+			}
+			successCount++;
+		}
+
+		if (successCount == 0)
+		{
+			string failuresStr = string.Join("; ", failures.ToArray());
+			string configuredStr = string.Join(", ", memberIdentities.ToArray());
 			throw new Aras.Server.Core.InnovatorServerException(
-				"Failed to add '" + loginName + "' to 'Aras PLM' identity: " + memberResult.getErrorString());
+				"Auto-created user '" + loginName + "' could not be added to ANY group identity. " +
+				"Configured: [" + configuredStr + "]. Failures: [" + failuresStr + "]. " +
+				"Either create the missing identities in Aras, or update the AutoMemberIdentities Variable.");
 		}
 	}
 
