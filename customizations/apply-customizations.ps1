@@ -716,6 +716,63 @@ if (-not (Test-Path $rcCss) -or ((Get-Content $rcCss -Raw) -ne $rcCssBody)) {
     Write-Host "  wrote $rcCss ($(($rcCssBody | Measure-Object -Character).Characters) chars)"
 }
 
+# ---------------------------------------------------------------- 6b6. app.js rc-sso.css injector
+# login.js loads only on the login page; logout (/Account/Logout) loads
+# only app.js. Both pages use the same `login-area__*` classes, so for the
+# logout view to inherit the same "quiet" padding from rc-sso.css the link
+# tag has to be added by app.js as well. Idempotent on `rc-sso-css` element id.
+$appJs = "$InnovatorRoot\OAuthServer\wwwroot\js\app.js"
+if (Test-Path $appJs) {
+    $appJsContent = Get-Content $appJs -Raw
+    if (-not $appJsContent.Contains('rc-sso-css')) {
+        Write-Host ""
+        Write-Host "== app.js: rc-sso.css link injector (logout-page coverage) =="
+        $rcAppJsAppend = @'
+
+// === Robotics Centre: ensure rc-sso.css loads on every OAuthServer page ===
+// app.js is loaded on login, logout, and other OAuthServer views; login.js is only
+// on the login page. The "quiet" padding rules in rc-sso.css need to apply on
+// logout too, so the CSS link is injected here unconditionally.
+(function () {
+	if (document.getElementById('rc-sso-css')) return;
+	var l = document.createElement('link');
+	l.id = 'rc-sso-css';
+	l.rel = 'stylesheet';
+	l.href = '/InnovatorServer/OAuthServer/css/rc-sso.css';
+	document.head.appendChild(l);
+})();
+'@
+        Backup-File $appJs
+        Set-Content -Path $appJs -Value ($appJsContent + $rcAppJsAppend) -NoNewline -Encoding UTF8
+        Write-Host "  patched app.js"
+    }
+}
+
+# ---------------------------------------------------------------- 6b7. Brand favicon (orange #f27e39 RC mark)
+# Replaces the shipped Aras favicon at all three deploy locations with the
+# Robotics Centre orange mark. Source built from rc-mark.svg + #f27e39 fill;
+# multi-resolution ICO (16/24/32/48/64/128/256). Backups (.aras-original.bak)
+# already preserved by initial install; this step is idempotent on file hash.
+$rcFavicon = Join-Path $PSScriptRoot 'images\favicon.ico'
+if (Test-Path $rcFavicon) {
+    $faviconTargets = @(
+        "$InnovatorRoot\Innovator\wwwroot\favicon.ico",
+        "$InnovatorRoot\OAuthServer\wwwroot\images\favicon.ico",
+        "$InnovatorRoot\Innovator\Client\images\favicon.ico"
+    )
+    $srcHash = (Get-FileHash -Algorithm MD5 -Path $rcFavicon).Hash
+    foreach ($dst in $faviconTargets) {
+        if (-not (Test-Path $dst)) { continue }
+        $dstHash = (Get-FileHash -Algorithm MD5 -Path $dst).Hash
+        if ($srcHash -eq $dstHash) { continue }
+        if (-not (Test-Path "$dst.aras-original.bak")) {
+            Copy-Item $dst "$dst.aras-original.bak"
+        }
+        Copy-Item $rcFavicon $dst -Force
+        Write-Host "  favicon -> $dst"
+    }
+}
+
 # ---------------------------------------------------------------- 6c. External HTTPS host (ngrok / reverse proxy)
 if ($ExternalHttpsUrl) {
     Write-Host ""
