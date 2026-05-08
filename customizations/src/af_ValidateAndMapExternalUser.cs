@@ -62,16 +62,56 @@ internal Item ValidateAndMapMicrosoftUser(System.Security.Claims.ClaimsPrincipal
 	// every Entra principal in the world can mint an Aras account. Plugin option
 	// `AllowedDomainNames` is a regex applied to the part of the address after '@'.
 	// Defaults to `.*` (allow all) if the plugin doesn't set it.
+	//
+	// SECURITY NOTE: when the OIDC plugin is configured for multi-tenant
+	// (TenantId="common"|"organizations") this allowlist is the ONLY gate keeping
+	// arbitrary Entra principals out. Don't relax it without understanding that.
 	string allowedEmailDomains = getProperty("allowed_domain_names");
 	if (!string.IsNullOrEmpty(allowedEmailDomains) && allowedEmailDomains != ".*")
 	{
 		string addressForCheck = !string.IsNullOrEmpty(email) ? email : upn;
-		int at = addressForCheck.LastIndexOf('@');
-		string emailDomain = at >= 0 ? addressForCheck.Substring(at + 1) : "";
-		bool ok = !string.IsNullOrEmpty(emailDomain) &&
-			System.Text.RegularExpressions.Regex.IsMatch(
+
+		// Reject pathological addresses with multiple '@' signs (e.g. "a@b@allowed.com").
+		// Per RFC 5321 a valid address has exactly one '@' between local and domain.
+		int firstAt = addressForCheck.IndexOf('@');
+		int lastAt  = addressForCheck.LastIndexOf('@');
+		if (firstAt < 0 || firstAt != lastAt)
+		{
+			throw new Aras.Server.Core.InnovatorServerException(
+				"Malformed email address (rejected by domain allowlist).");
+		}
+
+		string emailDomain = addressForCheck.Substring(lastAt + 1).Trim().ToLowerInvariant();
+
+		// IDNA normalize so an admin-supplied punycode domain matches a Unicode
+		// claim domain and vice versa. GetAscii throws for invalid labels —
+		// catch and reject.
+		try
+		{
+			emailDomain = new System.Globalization.IdnMapping().GetAscii(emailDomain);
+		}
+		catch (System.ArgumentException)
+		{
+			throw new Aras.Server.Core.InnovatorServerException(
+				"Email domain '" + emailDomain + "' is not a valid IDN.");
+		}
+
+		bool ok = false;
+		try
+		{
+			// 100ms regex timeout: admin-supplied pattern is potentially adversarial; ReDoS
+			// shouldn't be able to hang the worker.
+			ok = System.Text.RegularExpressions.Regex.IsMatch(
 				emailDomain, allowedEmailDomains,
-				System.Text.RegularExpressions.RegexOptions.IgnoreCase);
+				System.Text.RegularExpressions.RegexOptions.IgnoreCase | System.Text.RegularExpressions.RegexOptions.CultureInvariant,
+				System.TimeSpan.FromMilliseconds(100));
+		}
+		catch (System.Text.RegularExpressions.RegexMatchTimeoutException)
+		{
+			throw new Aras.Server.Core.InnovatorServerException(
+				"Email-domain allowlist regex timed out (ReDoS guard tripped). Fix AllowedDomainNames configuration.");
+		}
+
 		if (!ok)
 		{
 			throw new Aras.Server.Core.InnovatorServerException(
@@ -175,19 +215,30 @@ internal Item AutoCreateMicrosoftUser(Innovator inn, string email, string upn, s
 		}
 
 		// Add to "Aras PLM" identity (default general-user group in Aras 2025).
-		// Admins can promote later via the Aras admin UI.
-		if (!string.IsNullOrEmpty(aliasIdentityId))
+		// Admins can promote later via the Aras admin UI. Failure here is loud:
+		// silently leaving a user with no group membership produced symptoms that
+		// were hard to debug in earlier iterations (see codex review notes).
+		if (string.IsNullOrEmpty(aliasIdentityId))
 		{
-			Item idQ = inn.newItem("Identity", "get");
-			idQ.setProperty("name", "Aras PLM");
-			Item idR = idQ.apply();
-			if (!idR.isError() && idR.getItemCount() == 1)
-			{
-				Item member = inn.newItem("Member", "add");
-				member.setProperty("source_id", idR.getID());
-				member.setProperty("related_id", aliasIdentityId);
-				member.apply();
-			}
+			throw new Aras.Server.Core.InnovatorServerException(
+				"Auto-created user '" + loginName + "' has no alias Identity row — refusing to leave it without group membership.");
+		}
+		Item idQ = inn.newItem("Identity", "get");
+		idQ.setProperty("name", "Aras PLM");
+		Item idR = idQ.apply();
+		if (idR.isError() || idR.getItemCount() != 1)
+		{
+			throw new Aras.Server.Core.InnovatorServerException(
+				"Default identity 'Aras PLM' not found — auto-created user '" + loginName + "' has no group membership and would be unusable. Create that identity (or change the default in af_ValidateAndMapExternalUser) and retry.");
+		}
+		Item member = inn.newItem("Member", "add");
+		member.setProperty("source_id", idR.getID());
+		member.setProperty("related_id", aliasIdentityId);
+		Item memberResult = member.apply();
+		if (memberResult.isError())
+		{
+			throw new Aras.Server.Core.InnovatorServerException(
+				"Failed to add '" + loginName + "' to 'Aras PLM' identity: " + memberResult.getErrorString());
 		}
 	}
 

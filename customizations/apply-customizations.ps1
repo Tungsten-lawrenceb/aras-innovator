@@ -494,56 +494,29 @@ if (Test-Path $ishFile) {
 }
 
 # ---------------------------------------------------------------- 6b4. Service worker: ngrok-skip-browser-warning injector
-# Patches Modules/service-worker/index.ts to monkey-patch self.fetch so every
-# internal SW fetch carries `ngrok-skip-browser-warning: true`. Without this,
-# ngrok-free.dev edges show an interstitial and break SPA fetches.
+# Single atomic patch (v2): inserts a self.fetch monkey-patch right after the
+# runServiceWorker entry, AND replaces the existing fetch event listener with a
+# combined version that defines `rcInjectNgrokHeader`, short-circuits cross-
+# origin requests, and injects the bypass header for non-validateRequest paths.
+# Idempotency keys on the unique marker `RC_SW_v2`.
 $swSrc = "$InnovatorRoot\Innovator\Client\Modules\service-worker\index.ts"
-if (Test-Path $swSrc) {
+if ((Test-Path $swSrc) -and (-not (Get-Content $swSrc -Raw).Contains('RC_SW_v2'))) {
+    Write-Host ""
+    Write-Host "== service-worker: ngrok bypass + cross-origin skip (v2) =="
     $swContent = Get-Content $swSrc -Raw
-    # Patch 2: strengthen the fetch event listener to ALWAYS inject the bypass
-    # header for ngrok hosts even when validateRequest rejects (script tags,
-    # module imports, non-GET, etc).
-    # Patch 3: cross-origin requests (assets.ngrok.com fonts, login.microsoftonline.com,
-    # etc.) must skip the SW entirely. Aras's getResponse() can't handle them, and our
-    # bypass-header re-fetch fails CORS for opaque webfonts.
-    if (-not $swContent.Contains('rcSkipCrossOrigin')) {
-        $patCO = "(?s)self\.addEventListener\('fetch',\s*\(event\)\s*=>\s*\{.*?event\.respondWith\(responsePromise\);\s*\}\);"
-        if ($swContent -match $patCO) {
-            $nlCO = "`r`n"
-            $replCO = @"
-self.addEventListener('fetch', (event) => {$nlCO		const { request } = event;$nlCO$nlCO		// rcSkipCrossOrigin: cross-origin requests (fonts, IdP, etc.) must NOT be$nlCO		// re-fetched through the SW. Aras's getResponse() chokes on them, and$nlCO		// adding our bypass header forces CORS mode which fails for opaque$nlCO		// resources like webfonts. Let the browser handle them natively.$nlCO		try {$nlCO			const reqUrl = new URL(request.url);$nlCO			if (reqUrl.origin !== self.location.origin) {$nlCO				return;$nlCO			}$nlCO		} catch (e) { /* fall through */ }$nlCO$nlCO		const validRequest = validateRequest(request);$nlCO		if (!validRequest) {$nlCO			try {$nlCO				const url = new URL(request.url);$nlCO				if (/(?:\.ngrok-free\.(?:dev|app)|\.ngrok\.app|\.ngrok\.io)`$/i.test(url.hostname)) {$nlCO					event.respondWith(fetch(rcInjectNgrokHeader(request)));$nlCO				}$nlCO			} catch (e) { /* fall through */ }$nlCO			return;$nlCO		}$nlCO$nlCO		const responsePromise = getResponse(request);$nlCO		event.respondWith(responsePromise);$nlCO	});
-"@
-            Backup-File $swSrc
-            $swContent = [regex]::Replace($swContent, $patCO, $replCO)
-            Set-Content -Path $swSrc -Value $swContent -NoNewline -Encoding UTF8
-            Write-Host "  patched fetch listener (skip cross-origin)"
-        }
-    }
 
-    $rcMarker = 'rcInjectNgrokHeader'
-    if (-not $swContent.Contains($rcMarker)) {
-        $pat = "(?s)self\.addEventListener\('fetch',\s*\(event\)\s*=>\s*\{.*?event\.respondWith\(responsePromise\);\s*\}\);"
-        if ($swContent -match $pat) {
-            $nl = "`r`n"
-            $repl = @"
-// === Robotics Centre: always inject ngrok-skip-browser-warning ===$nl	const rcInjectNgrokHeader = (req) => {$nl		const h = new Headers(req.headers);$nl		if (!h.has('ngrok-skip-browser-warning')) h.set('ngrok-skip-browser-warning', 'true');$nl		return new Request(req, { headers: h });$nl	};$nl$nl	self.addEventListener('fetch', (event) => {$nl		const { request } = event;$nl		const validRequest = validateRequest(request);$nl		if (!validRequest) {$nl			try {$nl				const url = new URL(request.url);$nl				if (/(?:\.ngrok-free\.(?:dev|app)|\.ngrok\.app|\.ngrok\.io)`$/i.test(url.hostname)) {$nl					event.respondWith(fetch(rcInjectNgrokHeader(request)));$nl				}$nl			} catch (e) { /* fall through */ }$nl			return;$nl		}$nl$nl		const responsePromise = getResponse(request);$nl		event.respondWith(responsePromise);$nl	});
-"@
-            Backup-File $swSrc
-            $swContent = [regex]::Replace($swContent, $pat, $repl)
-            Set-Content -Path $swSrc -Value $swContent -NoNewline -Encoding UTF8
-            Write-Host "  patched fetch listener (strengthened ngrok bypass)"
-        }
-    }
-    # Patch 1: monkey-patch self.fetch (kept for inner-SW fetches)
-    if (-not $swContent.Contains('__rcOrigFetch')) {
-        Write-Host ""
-        Write-Host "== service-worker: ngrok-skip-browser-warning injector =="
-        $swMarker = 'const runServiceWorker = (self) => {'
-        $swInject = @'
+    $entryMarker = 'const runServiceWorker = (self) => {'
+    $listenerPattern = "(?s)self\.addEventListener\('fetch',\s*\(event\)\s*=>\s*\{.*?event\.respondWith\(responsePromise\);\s*\}\);"
+
+    if (-not $swContent.Contains($entryMarker)) {
+        Write-Warning "  service-worker entry marker not found; skipping"
+    } elseif ($swContent -notmatch $listenerPattern) {
+        Write-Warning "  service-worker fetch-listener pattern not found; skipping"
+    } else {
+        $entryInject = @'
 const runServiceWorker = (self) => {
-	// === Robotics Centre: ngrok-skip-browser-warning header injector ===
-	// ngrok-free.dev shows an interstitial unless requests carry this header.
-	// Monkey-patch self.fetch so every internal SW fetch bypasses the warning.
+	// === RC_SW_v2: ngrok bypass + cross-origin guard ===
+	// (a) Monkey-patch self.fetch so every fetch this SW makes carries the bypass header.
 	const __rcOrigFetch = self.fetch.bind(self);
 	self.fetch = function (input, init) {
 		try {
@@ -559,26 +532,30 @@ const runServiceWorker = (self) => {
 		} catch (e) { /* fall through */ }
 		return __rcOrigFetch(input, init);
 	};
-	// === /RC ===
 '@
-        if ($swContent.Contains($swMarker)) {
-            Backup-File $swSrc
-            Set-Content -Path $swSrc -Value $swContent.Replace($swMarker, $swInject) -NoNewline -Encoding UTF8
-            Write-Host "  patched service-worker source"
-            # Bump filesRevision (belt-and-suspenders; phone-home or loadTS patches may have already done it)
-            $clientCfg = "$InnovatorRoot\Innovator\Client\InnovatorClient.config"
-            if (Test-Path $clientCfg) {
-                [xml]$x = New-Object System.Xml.XmlDocument
-                $x.PreserveWhitespace = $true
-                $x.Load($clientCfg)
-                $node = $x.SelectSingleNode('/configuration/cachingModule')
-                if ($node) {
-                    $cur = $node.GetAttribute('filesRevision')
-                    $newRev = if ($cur -match '^\d+$') { ([int]$cur + 1).ToString() } else { 'rc-1' }
-                    $node.SetAttribute('filesRevision', $newRev)
-                    $x.Save($clientCfg)
-                    Write-Host ("  filesRevision: " + $cur + " -> " + $newRev)
-                }
+        $nl = "`r`n"
+        $listenerRepl = @"
+// === RC_SW_v2: ngrok bypass + cross-origin guard ===$nl	const rcInjectNgrokHeader = (req) => {$nl		const h = new Headers(req.headers);$nl		if (!h.has('ngrok-skip-browser-warning')) h.set('ngrok-skip-browser-warning', 'true');$nl		return new Request(req, { headers: h });$nl	};$nl$nl	self.addEventListener('fetch', (event) => {$nl		const { request } = event;$nl$nl		// Cross-origin: never proxy. Aras's getResponse() chokes; bypass-header force-CORSes opaque fonts.$nl		try {$nl			const reqUrl = new URL(request.url);$nl			if (reqUrl.origin !== self.location.origin) { return; }$nl		} catch (e) { /* fall through */ }$nl$nl		const validRequest = validateRequest(request);$nl		if (!validRequest) {$nl			try {$nl				const url = new URL(request.url);$nl				if (/(?:\.ngrok-free\.(?:dev|app)|\.ngrok\.app|\.ngrok\.io)`$/i.test(url.hostname)) {$nl					event.respondWith(fetch(rcInjectNgrokHeader(request)));$nl				}$nl			} catch (e) { /* fall through */ }$nl			return;$nl		}$nl$nl		const responsePromise = getResponse(request);$nl		event.respondWith(responsePromise);$nl	});
+"@
+        Backup-File $swSrc
+        $swContent = $swContent.Replace($entryMarker, $entryInject)
+        $swContent = [regex]::Replace($swContent, $listenerPattern, $listenerRepl)
+        Set-Content -Path $swSrc -Value $swContent -NoNewline -Encoding UTF8
+        Write-Host "  patched runServiceWorker entry + fetch listener"
+
+        # Bump filesRevision so the SPA pulls the new SW immediately
+        $clientCfg = "$InnovatorRoot\Innovator\Client\InnovatorClient.config"
+        if (Test-Path $clientCfg) {
+            [xml]$x = New-Object System.Xml.XmlDocument
+            $x.PreserveWhitespace = $true
+            $x.Load($clientCfg)
+            $node = $x.SelectSingleNode('/configuration/cachingModule')
+            if ($node) {
+                $cur = $node.GetAttribute('filesRevision')
+                $newRev = if ($cur -match '^\d+$') { ([int]$cur + 1).ToString() } else { 'rc-1' }
+                $node.SetAttribute('filesRevision', $newRev)
+                $x.Save($clientCfg)
+                Write-Host "  filesRevision: $cur -> $newRev"
             }
         }
     }
