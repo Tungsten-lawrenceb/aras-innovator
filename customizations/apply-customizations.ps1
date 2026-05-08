@@ -1154,6 +1154,19 @@ Get-WebApplication -Site 'Default Web Site' -ErrorAction SilentlyContinue |
         try { Set-ItemProperty -Path "IIS:\Sites\Default Web Site$($_.Path)" -Name preloadEnabled -Value $true -ErrorAction Stop } catch { }
     }
 
+# Boot survival: WAS (IIS Windows Activation Service) ships StartType=Manual on
+# Server 2022. In practice W3SVC declares WAS as a dependency so it gets pulled
+# up at boot, but Manual is fragile - if W3SVC ever moves to Manual or its
+# dependency chain breaks, IIS won't auto-start after a reboot. Promote WAS to
+# Automatic so the Aras stack survives an unattended reboot cleanly.
+foreach ($svcName in 'WAS','W3SVC') {
+    $svc = Get-Service -Name $svcName -ErrorAction SilentlyContinue
+    if ($svc -and $svc.StartType -ne 'Automatic') {
+        Set-Service -Name $svcName -StartupType Automatic
+        Write-Host "  set $svcName StartType=Automatic"
+    }
+}
+
 # ---------------------------------------------------------------- 7. IIS ACLs
 Write-Host ""
 Write-Host "== IIS_IUSRS modify ACL =="
