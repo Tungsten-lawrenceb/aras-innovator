@@ -58,13 +58,34 @@ internal Item ValidateAndMapMicrosoftUser(System.Security.Claims.ClaimsPrincipal
 		throw new InvalidOperationException("Entra claims missing both 'email' and 'preferred_username' / 'upn'.");
 	}
 
+	// Domain allowlist — required for multi-tenant App Registrations so that not
+	// every Entra principal in the world can mint an Aras account. Plugin option
+	// `AllowedDomainNames` is a regex applied to the part of the address after '@'.
+	// Defaults to `.*` (allow all) if the plugin doesn't set it.
+	string allowedEmailDomains = getProperty("allowed_domain_names");
+	if (!string.IsNullOrEmpty(allowedEmailDomains) && allowedEmailDomains != ".*")
+	{
+		string addressForCheck = !string.IsNullOrEmpty(email) ? email : upn;
+		int at = addressForCheck.LastIndexOf('@');
+		string emailDomain = at >= 0 ? addressForCheck.Substring(at + 1) : "";
+		bool ok = !string.IsNullOrEmpty(emailDomain) &&
+			System.Text.RegularExpressions.Regex.IsMatch(
+				emailDomain, allowedEmailDomains,
+				System.Text.RegularExpressions.RegexOptions.IgnoreCase);
+		if (!ok)
+		{
+			throw new Aras.Server.Core.InnovatorServerException(
+				"Email domain '" + emailDomain + "' is not in the allowlist (" + allowedEmailDomains + ")");
+		}
+	}
+
 	Innovator inn = getInnovator();
 
-	// 1. Match by email
-	if (!string.IsNullOrEmpty(email))
+	// 1. Match by login_name == UPN (preferred — UPN is immutable in Entra)
+	if (!string.IsNullOrEmpty(upn))
 	{
 		Item u = inn.newItem("User", "get");
-		u.setProperty("email", email);
+		u.setProperty("login_name", upn);
 		u.setProperty("logon_enabled", "1");
 		u.setAttribute("select", "login_name");
 		u = u.apply();
@@ -74,11 +95,13 @@ internal Item ValidateAndMapMicrosoftUser(System.Security.Claims.ClaimsPrincipal
 		}
 	}
 
-	// 2. Match by login_name == UPN
-	if (!string.IsNullOrEmpty(upn))
+	// 2. Fallback: match by email (mutable — risk of re-linking to a different
+	// principal if a tenant admin reassigns the address). UPN-first above mitigates
+	// this for the common case.
+	if (!string.IsNullOrEmpty(email))
 	{
 		Item u = inn.newItem("User", "get");
-		u.setProperty("login_name", upn);
+		u.setProperty("email", email);
 		u.setProperty("logon_enabled", "1");
 		u.setAttribute("select", "login_name");
 		u = u.apply();
@@ -130,16 +153,41 @@ internal Item AutoCreateMicrosoftUser(Innovator inn, string email, string upn, s
 				"Failed to auto-create Aras user for '" + loginName + "': " + created.getErrorString());
 		}
 
-		// Add to "Innovator User" identity (default group for general access)
-		Item idQ = inn.newItem("Identity", "get");
-		idQ.setProperty("name", "Innovator User");
-		Item idR = idQ.apply();
-		if (!idR.isError() && idR.getItemCount() == 1)
+		// Aras's AML User-add automatically creates the per-user alias Identity (the
+		// row that group-membership links target). It is NOT the User's id — it's
+		// linked via the Alias relationship: Alias.source_id = User.id, Alias.related_id
+		// = the per-user Identity id. Look it up and use that for the Member row.
+		Item aliasQ = inn.newItem("User", "get");
+		aliasQ.setProperty("id", created.getID());
+		aliasQ.setAttribute("select", "id");
+		Item aliasRel = aliasQ.createRelationship("Alias", "get");
+		aliasRel.setAttribute("select", "related_id");
+		Item aliasResult = aliasQ.apply();
+
+		string aliasIdentityId = null;
+		if (!aliasResult.isError() && aliasResult.getItemCount() == 1)
 		{
-			Item member = inn.newItem("Member", "add");
-			member.setProperty("source_id", idR.getID());
-			member.setProperty("related_id", created.getID());
-			member.apply();
+			Item rels = aliasResult.getRelationships();
+			if (rels.getItemCount() == 1)
+			{
+				aliasIdentityId = rels.getItemByIndex(0).getProperty("related_id");
+			}
+		}
+
+		// Add to "Aras PLM" identity (default general-user group in Aras 2025).
+		// Admins can promote later via the Aras admin UI.
+		if (!string.IsNullOrEmpty(aliasIdentityId))
+		{
+			Item idQ = inn.newItem("Identity", "get");
+			idQ.setProperty("name", "Aras PLM");
+			Item idR = idQ.apply();
+			if (!idR.isError() && idR.getItemCount() == 1)
+			{
+				Item member = inn.newItem("Member", "add");
+				member.setProperty("source_id", idR.getID());
+				member.setProperty("related_id", aliasIdentityId);
+				member.apply();
+			}
 		}
 	}
 

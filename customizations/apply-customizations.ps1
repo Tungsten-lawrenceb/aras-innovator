@@ -52,11 +52,16 @@ param(
     [string]$ExternalHttpsUrl = 'https://obliged-travesty-sacrament.ngrok-free.dev',
     [string]$AspNetCoreVersion = '8.0.0',
 
-    # Entra ID OIDC (leave empty to skip Entra setup)
-    [string]$EntraTenantId     = '',
-    [string]$EntraClientId     = '',
-    [string]$EntraClientSecret = '',
-    [string]$EntraDisplayName  = 'Sign in with Microsoft',
+    # Entra ID OIDC (leave empty to skip Entra setup).
+    # TenantId can be a tenant GUID (single-tenant), or 'common' / 'organizations'
+    # (multi-tenant). Multi-tenant requires the email-domain allowlist below to be
+    # set to a meaningful regex, otherwise any Entra principal in the world can
+    # auto-create an Aras account.
+    [string]$EntraTenantId                  = '',
+    [string]$EntraClientId                  = '',
+    [string]$EntraClientSecret              = '',
+    [string]$EntraDisplayName               = 'Sign in with Microsoft',
+    [string]$EntraAllowedEmailDomainsRegex  = '^(tungstencollaborative\.com|robotics-centre\.com)$',
 
     # SQL connection used to patch the af_ method (DB owner login from install)
     [string]$SqlServer       = 'localhost\SQLEXPRESS',
@@ -74,11 +79,14 @@ $ts = Get-Date -Format 'yyyyMMdd-HHmmss'
 
 function Backup-File {
     param([string]$Path)
-    if (Test-Path $Path) {
-        $bk = "$Path.preRC-$ts.bak"
-        if (-not (Test-Path $bk)) {
-            Copy-Item $Path $bk -Force
-        }
+    if (-not (Test-Path $Path)) { return }
+    # Avoid creating a fresh backup on every re-run if there's already at least one
+    # *.preRC-*.bak alongside the file (which means we backed it up at some prior point).
+    $existing = Get-ChildItem -Path (Split-Path $Path -Parent) -Filter ((Split-Path $Path -Leaf) + '.preRC-*.bak') -ErrorAction SilentlyContinue
+    if ($existing -and $existing.Count -gt 0) { return }
+    $bk = "$Path.preRC-$ts.bak"
+    if (-not (Test-Path $bk)) {
+        Copy-Item $Path $bk -Force
     }
 }
 
@@ -451,6 +459,129 @@ if (Test-Path $loginJs) {
     }
 }
 
+# ---------------------------------------------------------------- 6b3. loadTypeScriptMethods null-guard
+# Aras's shipped code does `bundle.invalidMethods?.length` but `bundle` itself can be null
+# when there are no TypeScript methods in the database. Patch to add `?.` on bundle too.
+$ishFile = "$InnovatorRoot\Innovator\Client\scripts\include\InitialSetupHeader.cshtml"
+if (Test-Path $ishFile) {
+    $ishContent = Get-Content $ishFile -Raw
+    $ishOld = 'if (bundle.invalidMethods?.length) {'
+    $ishNew = 'if (bundle?.invalidMethods?.length) {'
+    if ($ishContent.Contains($ishOld)) {
+        Write-Host ""
+        Write-Host "== InitialSetupHeader.cshtml: loadTypeScriptMethods null-guard =="
+        Backup-File $ishFile
+        Set-Content -Path $ishFile -Value $ishContent.Replace($ishOld, $ishNew) -NoNewline -Encoding UTF8
+        Write-Host "  patched"
+        # filesRevision bump is already handled by the phone-home patch step above; if
+        # neither the phone-home nor this file ever changed, nothing else bumps it.
+        # Belt-and-suspenders: bump now if not already done in this run.
+        $clientCfg = "$InnovatorRoot\Innovator\Client\InnovatorClient.config"
+        if (Test-Path $clientCfg) {
+            [xml]$x = New-Object System.Xml.XmlDocument
+            $x.PreserveWhitespace = $true
+            $x.Load($clientCfg)
+            $node = $x.SelectSingleNode('/configuration/cachingModule')
+            if ($node) {
+                $cur = $node.GetAttribute('filesRevision')
+                $newRev = if ($cur -match '^\d+$') { ([int]$cur + 1).ToString() } else { 'rc-1' }
+                $node.SetAttribute('filesRevision', $newRev)
+                $x.Save($clientCfg)
+                Write-Host "  filesRevision: $cur -> $newRev (cache busted)"
+            }
+        }
+    }
+}
+
+# ---------------------------------------------------------------- 6b4. Service worker: ngrok-skip-browser-warning injector
+# Patches Modules/service-worker/index.ts to monkey-patch self.fetch so every
+# internal SW fetch carries `ngrok-skip-browser-warning: true`. Without this,
+# ngrok-free.dev edges show an interstitial and break SPA fetches.
+$swSrc = "$InnovatorRoot\Innovator\Client\Modules\service-worker\index.ts"
+if (Test-Path $swSrc) {
+    $swContent = Get-Content $swSrc -Raw
+    if (-not $swContent.Contains('ngrok-skip-browser-warning')) {
+        Write-Host ""
+        Write-Host "== service-worker: ngrok-skip-browser-warning injector =="
+        $swMarker = 'const runServiceWorker = (self) => {'
+        $swInject = @'
+const runServiceWorker = (self) => {
+	// === Robotics Centre: ngrok-skip-browser-warning header injector ===
+	// ngrok-free.dev shows an interstitial unless requests carry this header.
+	// Monkey-patch self.fetch so every internal SW fetch bypasses the warning.
+	const __rcOrigFetch = self.fetch.bind(self);
+	self.fetch = function (input, init) {
+		try {
+			if (input instanceof Request) {
+				const h = new Headers(input.headers);
+				if (!h.has('ngrok-skip-browser-warning')) h.set('ngrok-skip-browser-warning', 'true');
+				input = new Request(input, { headers: h });
+			} else {
+				init = init || {};
+				init.headers = new Headers(init.headers || {});
+				if (!init.headers.has('ngrok-skip-browser-warning')) init.headers.set('ngrok-skip-browser-warning', 'true');
+			}
+		} catch (e) { /* fall through */ }
+		return __rcOrigFetch(input, init);
+	};
+	// === /RC ===
+'@
+        if ($swContent.Contains($swMarker)) {
+            Backup-File $swSrc
+            Set-Content -Path $swSrc -Value $swContent.Replace($swMarker, $swInject) -NoNewline -Encoding UTF8
+            Write-Host "  patched service-worker source"
+            # Bump filesRevision (belt-and-suspenders; phone-home or loadTS patches may have already done it)
+            $clientCfg = "$InnovatorRoot\Innovator\Client\InnovatorClient.config"
+            if (Test-Path $clientCfg) {
+                [xml]$x = New-Object System.Xml.XmlDocument
+                $x.PreserveWhitespace = $true
+                $x.Load($clientCfg)
+                $node = $x.SelectSingleNode('/configuration/cachingModule')
+                if ($node) {
+                    $cur = $node.GetAttribute('filesRevision')
+                    $newRev = if ($cur -match '^\d+$') { ([int]$cur + 1).ToString() } else { 'rc-1' }
+                    $node.SetAttribute('filesRevision', $newRev)
+                    $x.Save($clientCfg)
+                    Write-Host ("  filesRevision: " + $cur + " -> " + $newRev)
+                }
+            }
+        }
+    }
+}
+
+# ---------------------------------------------------------------- 6b5. OAuth login page CSS (rc-sso.css)
+# Loaded by the SSO button injector. Provides:
+#  - .rc-sso-button: spacing under the local Login button
+#  - .login-area__logo / __logo-image / __version-info: extra "quiet"
+#    whitespace around the custom branded login logo.
+$rcCss = "$InnovatorRoot\OAuthServer\wwwroot\css\rc-sso.css"
+$rcCssBody = @"
+.rc-sso-button {
+	margin-top: 12px;
+}
+
+/* RC: extra whitespace around the login-page logo */
+.login-area__logo {
+	padding: 28px 24px 16px;
+}
+.login-area__logo-image {
+	max-width: 70%;
+	height: auto;
+	margin: 0 auto 12px;
+	display: block;
+}
+.login-area__version-info {
+	margin-top: 8px;
+	text-align: center;
+}
+"@
+if (-not (Test-Path $rcCss) -or ((Get-Content $rcCss -Raw) -ne $rcCssBody)) {
+    Write-Host ""
+    Write-Host "== rc-sso.css =="
+    Set-Content -Path $rcCss -Value $rcCssBody -NoNewline -Encoding UTF8
+    Write-Host "  wrote $rcCss ($(($rcCssBody | Measure-Object -Character).Characters) chars)"
+}
+
 # ---------------------------------------------------------------- 6c. External HTTPS host (ngrok / reverse proxy)
 if ($ExternalHttpsUrl) {
     Write-Host ""
@@ -625,18 +756,24 @@ if ($EntraTenantId -and $EntraClientId) {
                     Write-Host "  + enabled ExternalUserByServerMethodMapper"
                 }
             }
-            # Append ExternalUserByServerMethodMapper if missing entirely
-            if (-not ($arr | Where-Object { $_.Name -eq 'Aras.OAuth.Server.Plugins.ExternalUserByServerMethodMapper' })) {
+            # Append ExternalUserByServerMethodMapper if missing entirely; otherwise
+            # update its AllowedDomainNames option to match -EntraAllowedEmailDomainsRegex.
+            $existingMapper = $arr | Where-Object { $_.Name -eq 'Aras.OAuth.Server.Plugins.ExternalUserByServerMethodMapper' } | Select-Object -First 1
+            if (-not $existingMapper) {
                 $arr += [PSCustomObject]@{
                     Name    = 'Aras.OAuth.Server.Plugins.ExternalUserByServerMethodMapper'
                     Enabled = $true
                     Options = [PSCustomObject]@{
-                        AllowedDomainNames = '.*'
+                        AllowedDomainNames = $EntraAllowedEmailDomainsRegex
                         AllowedDomainUsers = '.+'
                         DeniedDomainUsers  = ''
                     }
                 }
                 Write-Host "  + added ExternalUserByServerMethodMapper"
+                $changed = $true
+            } elseif ($existingMapper.Options.AllowedDomainNames -ne $EntraAllowedEmailDomainsRegex) {
+                $existingMapper.Options.AllowedDomainNames = $EntraAllowedEmailDomainsRegex
+                Write-Host ("  + updated AllowedDomainNames -> " + $EntraAllowedEmailDomainsRegex)
                 $changed = $true
             }
             # Replace any existing MicrosoftEntra entry to refresh secret/tenant/client
@@ -667,21 +804,25 @@ if ($EntraTenantId -and $EntraClientId) {
         $newBody = Get-Content $methodFile -Raw
         $conn = New-Object System.Data.SqlClient.SqlConnection
         $conn.ConnectionString = "Server=$SqlServer;Database=$SqlDatabase;User Id=$SqlUser;Password=$SqlPassword;TrustServerCertificate=True;"
-        $conn.Open()
-        $cmd = $conn.CreateCommand()
-        $cmd.CommandText = "SELECT method_code FROM [innovator].[METHOD] WHERE name='af_ValidateAndMapExternalUser'"
-        $current = [string]$cmd.ExecuteScalar()
-        $normalize = { param($s) ($s -replace '\s+', '') }
-        if ($current -and (& $normalize $current) -eq (& $normalize $newBody)) {
-            Write-Host "  - af_ValidateAndMapExternalUser body matches source"
-        } else {
-            $cmd.Parameters.Clear()
-            $cmd.CommandText = "UPDATE [innovator].[METHOD] SET method_code=@code WHERE name='af_ValidateAndMapExternalUser'"
-            [void]$cmd.Parameters.AddWithValue('@code', $newBody)
-            $rows = $cmd.ExecuteNonQuery()
-            Write-Host "  + patched af_ValidateAndMapExternalUser ($rows row(s))"
+        try {
+            $conn.Open()
+            $cmd = $conn.CreateCommand()
+            $cmd.CommandText = "SELECT method_code FROM [innovator].[METHOD] WHERE name='af_ValidateAndMapExternalUser'"
+            $current = [string]$cmd.ExecuteScalar()
+            $normalize = { param($s) ($s -replace '\s+', '') }
+            if ($current -and (& $normalize $current) -eq (& $normalize $newBody)) {
+                Write-Host "  - af_ValidateAndMapExternalUser body matches source"
+            } else {
+                $cmd.Parameters.Clear()
+                $cmd.CommandText = "UPDATE [innovator].[METHOD] SET method_code=@code WHERE name='af_ValidateAndMapExternalUser'"
+                [void]$cmd.Parameters.AddWithValue('@code', $newBody)
+                $rows = $cmd.ExecuteNonQuery()
+                Write-Host "  + patched af_ValidateAndMapExternalUser ($rows row(s))"
+            }
+        } finally {
+            if ($conn.State -ne 'Closed') { $conn.Close() }
+            $conn.Dispose()
         }
-        $conn.Close()
     }
 }
 

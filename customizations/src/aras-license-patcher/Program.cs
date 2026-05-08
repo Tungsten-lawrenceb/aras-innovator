@@ -40,13 +40,36 @@ class Program
             if (m.Name == "CheckExternalAuthenticationLicense" || m.Name == "OnActionExecuting")
             {
                 Console.WriteLine($"  Patching {m.Name}({string.Join(",", m.Parameters)}) ...");
-                // Replace body with a single `ret`. ActionFilterAttribute.OnActionExecuting
-                // is itself a no-op by default, so dropping the chain call is safe.
+                // Replace body with an empty implementation appropriate for the return type.
+                // For void: just `ret`. For non-void: push a default value first.
+                // Both methods we patch are currently void; this keeps the patcher safe if
+                // Aras renames a method or changes a signature in a future build.
                 var il = m.Body.GetILProcessor();
                 m.Body.Instructions.Clear();
                 m.Body.ExceptionHandlers.Clear();
                 m.Body.Variables.Clear();
-                il.Append(il.Create(OpCodes.Ret));
+                var rt = m.ReturnType;
+                if (rt.FullName == "System.Void")
+                {
+                    il.Append(il.Create(OpCodes.Ret));
+                }
+                else if (rt.IsValueType)
+                {
+                    // default(T): ldloca/initobj/ldloc, then ret
+                    var local = new VariableDefinition(rt);
+                    m.Body.Variables.Add(local);
+                    m.Body.InitLocals = true;
+                    il.Append(il.Create(OpCodes.Ldloca_S, local));
+                    il.Append(il.Create(OpCodes.Initobj, rt));
+                    il.Append(il.Create(OpCodes.Ldloc_0));
+                    il.Append(il.Create(OpCodes.Ret));
+                }
+                else
+                {
+                    // reference type: ldnull; ret
+                    il.Append(il.Create(OpCodes.Ldnull));
+                    il.Append(il.Create(OpCodes.Ret));
+                }
                 patched++;
             }
         }

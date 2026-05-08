@@ -31,6 +31,13 @@ public class HostingStartup : IHostingStartup
             if (string.IsNullOrWhiteSpace(opts.TenantId) || string.IsNullOrWhiteSpace(opts.ClientId))
                 return;
 
+            // Multi-tenant support: when TenantId is "common" or "organizations" use the
+            // matching well-known endpoint and validate issuer against an allowlist driven
+            // from configuration (the email-domain gate in af_ValidateAndMapExternalUser is
+            // the actual access boundary; this issuer check just keeps things tidy).
+            bool isMultiTenant = string.Equals(opts.TenantId, "common", StringComparison.OrdinalIgnoreCase)
+                              || string.Equals(opts.TenantId, "organizations", StringComparison.OrdinalIgnoreCase);
+
             services.AddAuthentication()
                 .AddOpenIdConnect(opts.AuthenticationType, opts.DisplayName, o =>
                 {
@@ -40,7 +47,7 @@ public class HostingStartup : IHostingStartup
 
                     o.ResponseType = OpenIdConnectResponseType.Code;
                     o.UsePkce = true;
-                    o.SaveTokens = true;
+                    o.SaveTokens = false;            // tokens are not forwarded; don't persist
                     o.GetClaimsFromUserInfoEndpoint = true;
                     o.CallbackPath = "/signin-microsoft";
                     o.SignedOutCallbackPath = "/signout-callback-microsoft";
@@ -56,25 +63,27 @@ public class HostingStartup : IHostingStartup
                     o.TokenValidationParameters = new TokenValidationParameters
                     {
                         NameClaimType = "preferred_username",
-                        // Validate the issuer against Entra's tenant-specific URL
-                        ValidateIssuer = true,
+                        ValidateIssuer = !isMultiTenant,    // multi-tenant: tenant-id varies in iss
                     };
+                    if (isMultiTenant)
+                    {
+                        // Allow any tenant — domain allowlist downstream is the real gate.
+                        o.TokenValidationParameters.IssuerValidator = (string iss, SecurityToken _, TokenValidationParameters _) => iss;
+                    }
 
-                    // Entra returns claims in v2 endpoint with "oid" (object ID) — keep as-is.
-                    // Convert id_token "name" claim into a stable value the af_ method can use.
                     o.Events = new OpenIdConnectEvents
                     {
                         OnTokenValidated = ctxArgs => Task.CompletedTask,
                         // Don't pass an arbitrary errorId to Aras's Account/Login (its
                         // ErrorDispatcher expects an IdentityServer4-issued errorId and NREs
-                        // on anything else). Show the raw error inline so we can debug.
+                        // on anything else). Return a generic message — don't echo provider
+                        // exception detail back to the browser (info disclosure).
                         OnRemoteFailure = ctxArgs =>
                         {
-                            var msg = ctxArgs.Failure?.Message ?? "unknown remote failure";
                             ctxArgs.Response.StatusCode = 502;
                             ctxArgs.Response.ContentType = "text/plain; charset=utf-8";
                             var bytes = System.Text.Encoding.UTF8.GetBytes(
-                                "Microsoft Entra sign-in failed.\n\n" + msg + "\n");
+                                "Sign-in with Microsoft failed. Contact your administrator if this persists.\n");
                             var t = ctxArgs.Response.Body.WriteAsync(bytes, 0, bytes.Length);
                             ctxArgs.HandleResponse();
                             return t;
