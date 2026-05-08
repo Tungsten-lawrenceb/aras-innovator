@@ -979,6 +979,21 @@ if ($EntraTenantId -and $EntraClientId) {
             -Server $SqlServer -Database $SqlDatabase -DbUser $SqlUser -DbPassword $SqlPassword `
             -Name 'AutoMemberIdentities' -Value 'Aras PLM' 2>&1 | ForEach-Object { Write-Host "  $_" }
     }
+
+    # 6d.5 Patch UpdateTimeZoneInfo Method to use HTTPS for the Aras tzupdate fetch
+    # Aras ships UpdateTimeZoneInfo with `http://www.aras.com/timezones/tzupdate.xml`.
+    # Behind any HTTPS frontend (ngrok / cloudflared / SSL-bound IIS), browsers block
+    # this as mixed content and the action fails silently. www.aras.com serves the
+    # same content over HTTPS, so the fix is a one-character URL flip in the Method
+    # body. Idempotent on the resulting `https://www.aras.com/timezones/` substring.
+    $tzPatcher = Join-Path $PSScriptRoot 'patch-tz-url.ps1'
+    if (Test-Path $tzPatcher) {
+        Write-Host ""
+        Write-Host "== UpdateTimeZoneInfo: http -> https =="
+        & powershell -ExecutionPolicy Bypass -File $tzPatcher `
+            -Server $SqlServer -Database $SqlDatabase -DbUser $SqlUser -DbPassword $SqlPassword `
+            2>&1 | ForEach-Object { Write-Host "  $_" }
+    }
 }
 
 # ---------------------------------------------------------------- 6e. Strip Aras.ExternalAuthentication license filter
