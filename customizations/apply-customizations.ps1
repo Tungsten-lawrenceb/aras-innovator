@@ -1144,3 +1144,30 @@ if (-not $SkipIisReset) {
 
 Write-Host ""
 Write-Host "Done."
+
+# ---------------------------------------------------------------- 9. Post-install checklist
+# Items the Aras 2025 Installation Guide says belong to the operator after the
+# automated install. We can't fully script these because each requires either an
+# authenticated browser session (UpdateTimeZoneInfo) or judgement (subscription
+# / feature licenses, RAM sizing). Print as reminders on every orchestrator run.
+Write-Host ''
+Write-Host '====================================================='
+Write-Host '  POST-INSTALL OPERATOR CHECKLIST (manual, per Aras docs)'
+Write-Host '====================================================='
+Write-Host '  [ ] Aras-2025 Installation Guide section 5.1.2:'
+Write-Host '       sign into the SPA, run Actions -> UpdateTimeZoneInfo'
+Write-Host '       (re-run any time DST or TZ legislation changes; quarterly is plenty)'
+Write-Host ''
+Write-Host '  [ ] Section 6 - Feature Licenses:'
+Write-Host '       confirm the Aras Subscription scope. The orchestrator IL-strips'
+Write-Host '       OIDC + ConsumeLicense gating. For production traffic you need a'
+Write-Host '       real Aras Subscription with the relevant feature licenses.'
+Write-Host ''
+Write-Host '  [ ] Platform Spec section 2.2:'
+Write-Host '       VM has 8 GB RAM; spec minimum is 16 GB, recommended 32. Bump'
+Write-Host '       before serving more than one concurrent tester.'
+Write-Host ''
+Write-Host '  [ ] If using Microsoft Graph mail (deliveryMethod=MicrosoftGraphApi):'
+Write-Host '       confirm New-ApplicationAccessPolicy in Exchange Online scopes'
+Write-Host '       Mail.Send to a single sender mailbox - tenant-wide otherwise.'
+Write-Host '====================================================='
