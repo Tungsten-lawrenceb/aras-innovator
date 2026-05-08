@@ -1051,6 +1051,24 @@ if ($EntraTenantId -and $EntraClientId) {
             -Server $SqlServer -Database $SqlDatabase -DbUser $SqlUser -DbPassword $SqlPassword `
             2>&1 | ForEach-Object { Write-Host "  $_" }
     }
+
+    # 6d.6 Patch cui_common_layouts_init Method - guard nullable favorite layout
+    # Aras's shipped Method blows up with "Cannot read properties of undefined"
+    # for users with no saved favorite layout, partially populated layouts, or
+    # deleted favorites. v1 fixed the outer settings destructure; v2 adds:
+    #  - early return if favoriteLayoutData itself is missing (deleted favorite)
+    #  - clean-label return if settings/pagination/grid is partial (no spurious '*' marker)
+    #  - state-side null guard for stateGrid / statePagination
+    #  - root-path guard before data.get(favoriteLayout).label
+    # Idempotent on the v2 marker. Codex review v2.1 design.
+    $cuiPatcher = Join-Path $PSScriptRoot 'patch-cui-method-v2.ps1'
+    if (Test-Path $cuiPatcher) {
+        Write-Host ""
+        Write-Host "== cui_common_layouts_init: v2 null-guards =="
+        & powershell -ExecutionPolicy Bypass -File $cuiPatcher `
+            -Server $SqlServer -Database $SqlDatabase -DbUser $SqlUser -DbPassword $SqlPassword `
+            2>&1 | ForEach-Object { Write-Host "  $_" }
+    }
 }
 
 # ---------------------------------------------------------------- 6e. Strip Aras.ExternalAuthentication license filter
