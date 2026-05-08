@@ -67,7 +67,7 @@ param(
     [string]$SqlServer       = 'localhost\SQLEXPRESS',
     [string]$SqlDatabase     = 'InnovatorSolutions',
     [string]$SqlUser         = 'sa',
-    [string]$SqlPassword     = '<<DB_PASSWORD>>',
+    [string]$SqlPassword     = 'ArasDB-2025!',
 
     [switch]$SkipIisReset
 )
@@ -493,13 +493,135 @@ if (Test-Path $ishFile) {
     }
 }
 
+# ---------------------------------------------------------------- 6b35. OAuthServerDiscovery: drop mixed-content URLs
+# When the SPA is served over HTTPS via ngrok but the OAuthServerDiscovery
+# list still includes the LAN HTTP URLs (192.168.x / hostname / localhost),
+# the browser blocks them as mixed content. The SPA's `lastAccessibleUrl`
+# in localStorage can pin one of those HTTP URLs as the priority candidate,
+# at which point the discovery fetch never resolves to the working HTTPS
+# entry. Filter the list at runtime so HTTPS pages only ever try HTTPS URLs.
+# Idempotency keys on the marker `RC: drop URLs that would trigger`.
+$oauthDiscoveryTs = "$InnovatorRoot\Innovator\Client\Modules\aras.innovator.AuthenticationFramework\Scripts\OAuthServerDiscovery.ts"
+if ((Test-Path $oauthDiscoveryTs) -and (-not (Get-Content $oauthDiscoveryTs -Raw).Contains('RC: drop URLs that would trigger'))) {
+    Write-Host ""
+    Write-Host "== OAuthServerDiscovery: filter mixed-content URLs =="
+    $tsContent = Get-Content $oauthDiscoveryTs -Raw
+    $tsOld = @'
+				const oauthServerUrls = discoveryJson.locations.map(
+					function (location) {
+						return location.uri;
+					}
+				);
+				return oauthServerUrls;
+'@
+    $tsNew = @'
+				let oauthServerUrls = discoveryJson.locations.map(
+					function (location) {
+						return location.uri;
+					}
+				);
+
+				// RC: drop URLs that would trigger mixed-content blocking.
+				// When the SPA is loaded over HTTPS, only HTTPS discovery URLs
+				// can be fetched by the browser; HTTP candidates are blocked
+				// before the request leaves the page, so trying them produces
+				// noisy console warnings and a stale `lastAccessibleUrl` in
+				// localStorage can pin the SPA to one that will never work.
+				if (window.location.protocol === 'https:') {
+					oauthServerUrls = oauthServerUrls.filter(function (u) {
+						return typeof u === 'string' && u.toLowerCase().indexOf('https:') === 0;
+					});
+				}
+				return oauthServerUrls;
+'@
+    if ($tsContent.Contains($tsOld)) {
+        Backup-File $oauthDiscoveryTs
+        Set-Content -Path $oauthDiscoveryTs -Value $tsContent.Replace($tsOld, $tsNew) -NoNewline -Encoding UTF8
+        Write-Host "  patched OAuthServerDiscovery.ts"
+
+        # Bump filesRevision so the SPA pulls the new discovery script
+        $clientCfg = "$InnovatorRoot\Innovator\Client\InnovatorClient.config"
+        if (Test-Path $clientCfg) {
+            [xml]$x = New-Object System.Xml.XmlDocument
+            $x.PreserveWhitespace = $true
+            $x.Load($clientCfg)
+            $node = $x.SelectSingleNode('/configuration/cachingModule')
+            if ($node) {
+                $cur = $node.GetAttribute('filesRevision')
+                $newRev = if ($cur -match '^\d+$') { ([int]$cur + 1).ToString() } else { 'rc-1' }
+                $node.SetAttribute('filesRevision', $newRev)
+                $x.Save($clientCfg)
+                Write-Host "  filesRevision: $cur -> $newRev"
+            }
+        }
+    } else {
+        Write-Warning "  OAuthServerDiscovery.ts source pattern not found; skipping"
+    }
+}
+
 # ---------------------------------------------------------------- 6b4. Service worker: ngrok-skip-browser-warning injector
 # Single atomic patch (v2): inserts a self.fetch monkey-patch right after the
 # runServiceWorker entry, AND replaces the existing fetch event listener with a
 # combined version that defines `rcInjectNgrokHeader`, short-circuits cross-
 # origin requests, and injects the bypass header for non-validateRequest paths.
-# Idempotency keys on the unique marker `RC_SW_v2`.
+#
+# Cleanup: this step also strips any v1 residue (`Robotics Centre:` blocks
+# from the previous patch generation) before the idempotency check, so that
+# v2-on-top-of-v1 deployments don't end up with duplicate `__rcOrigFetch`
+# / `rcInjectNgrokHeader` const declarations (which would crash the SW with
+# `Identifier '...' has already been declared` on importScripts).
 $swSrc = "$InnovatorRoot\Innovator\Client\Modules\service-worker\index.ts"
+if (Test-Path $swSrc) {
+    $swContent = Get-Content $swSrc -Raw
+    $swChanged = $false
+
+    # ---- Strip v1 fetch monkey-patch residue ---------------------------------
+    # Block runs from `// === Robotics Centre: ngrok-skip-browser-warning header
+    # injector ===` through `// === /RC ===` and ALL lines between.
+    $v1FetchPattern = '(?s)\t// === Robotics Centre: ngrok-skip-browser-warning header injector ===.*?\t// === /RC ===\r?\n'
+    if ([regex]::IsMatch($swContent, $v1FetchPattern)) {
+        $swContent = [regex]::Replace($swContent, $v1FetchPattern, '')
+        $swChanged = $true
+        Write-Host "  stripped v1 fetch monkey-patch residue"
+    }
+
+    # ---- Strip v1 standalone rcInjectNgrokHeader helper ----------------------
+    # Sits before the v2 listener replacement; declares the same const that
+    # v2 then re-declares, hence the duplicate-identifier crash.
+    $v1HelperBlock = "`t// === Robotics Centre: always inject ngrok-skip-browser-warning ===`r`n`tconst rcInjectNgrokHeader = (req) => {`r`n`t`tconst h = new Headers(req.headers);`r`n`t`tif (!h.has('ngrok-skip-browser-warning')) h.set('ngrok-skip-browser-warning', 'true');`r`n`t`treturn new Request(req, { headers: h });`r`n`t};`r`n`r`n"
+    if ($swContent.Contains($v1HelperBlock)) {
+        $swContent = $swContent.Replace($v1HelperBlock, '')
+        $swChanged = $true
+        Write-Host "  stripped v1 rcInjectNgrokHeader helper residue"
+    }
+
+    # Save the cleaned content back if we stripped anything but v2 already done
+    $hasV2 = $swContent.Contains('RC_SW_v2')
+
+    if ($swChanged -and $hasV2) {
+        # v1 residue removed and v2 already applied — write cleaned file
+        Backup-File $swSrc
+        Set-Content -Path $swSrc -Value $swContent -NoNewline -Encoding UTF8
+        Write-Host "== service-worker: cleaned v1 residue (v2 already in place) =="
+
+        # Bump filesRevision so SPA pulls the cleaned SW
+        $clientCfg = "$InnovatorRoot\Innovator\Client\InnovatorClient.config"
+        if (Test-Path $clientCfg) {
+            [xml]$x = New-Object System.Xml.XmlDocument
+            $x.PreserveWhitespace = $true
+            $x.Load($clientCfg)
+            $node = $x.SelectSingleNode('/configuration/cachingModule')
+            if ($node) {
+                $cur = $node.GetAttribute('filesRevision')
+                $newRev = if ($cur -match '^\d+$') { ([int]$cur + 1).ToString() } else { 'rc-1' }
+                $node.SetAttribute('filesRevision', $newRev)
+                $x.Save($clientCfg)
+                Write-Host "  filesRevision: $cur -> $newRev"
+            }
+        }
+    }
+}
+
 if ((Test-Path $swSrc) -and (-not (Get-Content $swSrc -Raw).Contains('RC_SW_v2'))) {
     Write-Host ""
     Write-Host "== service-worker: ngrok bypass + cross-origin skip (v2) =="
@@ -866,10 +988,87 @@ if ((Test-Path $patcher) -and (Test-Path $serverDll)) {
     }
 }
 
-# ---------------------------------------------------------------- 6f. Log junctions under C:\Share\logs
-# Surface every Aras / ngrok / IIS log directory under C:\Share\logs so the SMB
-# share gives a single rooted view. Operators (and remote tooling) can then read
-# Aras, ngrok and IIS logs over the share without WinRM / RDP.
+# ---------------------------------------------------------------- 6e3. Strip ConsumeLicense feature gate
+# Bypass server-side feature-license consumption. Aras.Server.Licensing.LicenseManager.ConsumeLicense(string)
+# in Aras.Server.Core.dll is the entry point used by SSVC (Discussions / Forums) and other paid features
+# to "consume" a per-user feature license at runtime. When the install has no license for that feature,
+# the method throws "Failed to Consume License for the feature ...". We replace its body with `ldstr
+# "RC_BYPASS_LICENSE"; ret` so all downstream callers think they got a license back.
+# Idempotent: a byte-grep for the marker string short-circuits if the DLL is already patched.
+$patcherC = Join-Path $PSScriptRoot 'tools\aras-license-patcher-consume\PatchConsumeLicense.dll'
+$coreDll  = "$InnovatorRoot\Innovator\Server\bin\Aras.Server.Core.dll"
+if ((Test-Path $patcherC) -and (Test-Path $coreDll)) {
+    Write-Host ""
+    Write-Host "== Aras.Server.Core ConsumeLicense bypass =="
+    $bytes = [IO.File]::ReadAllBytes($coreDll)
+    $combined = [System.Text.Encoding]::Unicode.GetString($bytes) + [System.Text.Encoding]::ASCII.GetString($bytes)
+    if ($combined -match 'RC_BYPASS_LICENSE') {
+        Write-Host "  - already patched (RC_BYPASS_LICENSE marker present)"
+    } else {
+        # Pool stop so the DLL isn't locked. Pool name is the canonical Aras Innovator AppPool name.
+        $pool = 'Aras Innovator AppPool ASP.NET Core'
+        Stop-WebAppPool -Name $pool -ErrorAction SilentlyContinue
+        # Wait for full stop (Stop is async; Start fails if pool is still Stopping)
+        for ($i = 0; $i -lt 30; $i++) {
+            $st = (Get-IISAppPool -Name $pool -ErrorAction SilentlyContinue).State
+            if ($st -eq 'Stopped') { break }
+            Start-Sleep -Seconds 1
+        }
+        & dotnet $patcherC $coreDll 2>&1 | ForEach-Object { Write-Host ('  ' + $_) }
+        $exit = $LASTEXITCODE
+        Start-WebAppPool -Name $pool -ErrorAction SilentlyContinue
+        if ($exit -ne 0) {
+            Write-Warning ("Consume-license patcher exited " + $exit)
+        }
+    }
+}
+
+# ---------------------------------------------------------------- 6e2. Force IsSSVCLicenseOk = true
+# Same family as 6e: bypass an Aras feature license that is not held by this
+# install. The SSVC (Discussions / Forums / MyDiscussions) feature gates on a
+# server-reported boolean `IsSSVCLicenseOk`. When false, MyDiscussions.html
+# redirects to GetLicense.html, which manifests in browsers as Chrome's
+# "webpage might be temporarily down or moved permanently" error (the redirect
+# chain dead-ends in the unlicensed install). Forcing the SPA-side common
+# property to true short-circuits the redirect for every SSVC view at boot.
+# Idempotent on the marker `RC_LICENSE_BYPASS_SSVC`.
+$ishFile = "$InnovatorRoot\Innovator\Client\scripts\include\InitialSetupHeader.cshtml"
+if (Test-Path $ishFile) {
+    $ishContent = Get-Content $ishFile -Raw
+    if (-not $ishContent.Contains('RC_LICENSE_BYPASS_SSVC')) {
+        $ishOld = "aras.setCommonPropertyValue('IsSSVCLicenseOk', arasMainWindowInfo.IsSSVCLicenseOk);"
+        $ishNew = @'
+// RC_LICENSE_BYPASS_SSVC: same family of patch as the server-side
+					// ExternalAuthenticationLicenseFilter strip - force the SSVC feature
+					// gate open client-side so MyDiscussions / Forums / Discussions don't
+					// redirect to GetLicense.html in unlicensed dev environments.
+					aras.setCommonPropertyValue('IsSSVCLicenseOk', true);
+'@.Trim()
+        if ($ishContent.Contains($ishOld)) {
+            Write-Host ""
+            Write-Host "== InitialSetupHeader.cshtml: force IsSSVCLicenseOk = true =="
+            Backup-File $ishFile
+            Set-Content -Path $ishFile -Value $ishContent.Replace($ishOld, $ishNew) -NoNewline -Encoding UTF8
+            Write-Host "  patched"
+            # No filesRevision bump needed - .cshtml is rendered inline server-side and
+            # picked up after an app-pool recycle. step 8 (iisreset) handles that.
+        } else {
+            Write-Warning "  IsSSVCLicenseOk source pattern not found; skipping"
+        }
+    }
+}
+
+# ---------------------------------------------------------------- 6f. Share junctions
+# (a) Innovator install-root junction so the Linux side that mounts C:\Share can
+#     read AND write live install files directly (Client, OAuthServer, Server,
+#     Vault, ...) without round-tripping through PowerShell heredoc patches.
+# (b) Log junctions so logs are also reachable through the same share.
+$shareInstall = 'C:\Share\innovator'
+if (-not (Test-Path $shareInstall)) {
+    cmd /c mklink /J "$shareInstall" "$InnovatorRoot" 2>&1 | Out-Null
+    if (Test-Path $shareInstall) { Write-Host "junction: $shareInstall -> $InnovatorRoot" }
+}
+
 $logsBase = 'C:\Share\logs'
 if (-not (Test-Path $logsBase)) {
     New-Item -ItemType Directory -Path $logsBase -Force | Out-Null

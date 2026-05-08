@@ -6,6 +6,11 @@
 *.bak
 *.pre*.bak
 
+# Local scratch / dev artifacts kept on the operator box, not part of the repo
+customizations/src/**/refs/
+customizations/src/**/test/
+customizations/src/**/decomp-after/
+
 # Local files
 .DS_Store
 Thumbs.db
