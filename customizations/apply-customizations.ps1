@@ -500,7 +500,25 @@ if (Test-Path $ishFile) {
 $swSrc = "$InnovatorRoot\Innovator\Client\Modules\service-worker\index.ts"
 if (Test-Path $swSrc) {
     $swContent = Get-Content $swSrc -Raw
-    if (-not $swContent.Contains('ngrok-skip-browser-warning')) {
+    # Patch 2: strengthen the fetch event listener to ALWAYS inject the bypass
+    # header for ngrok hosts even when validateRequest rejects (script tags,
+    # module imports, non-GET, etc).
+    $rcMarker = 'rcInjectNgrokHeader'
+    if (-not $swContent.Contains($rcMarker)) {
+        $pat = "(?s)self\.addEventListener\('fetch',\s*\(event\)\s*=>\s*\{.*?event\.respondWith\(responsePromise\);\s*\}\);"
+        if ($swContent -match $pat) {
+            $nl = "`r`n"
+            $repl = @"
+// === Robotics Centre: always inject ngrok-skip-browser-warning ===$nl	const rcInjectNgrokHeader = (req) => {$nl		const h = new Headers(req.headers);$nl		if (!h.has('ngrok-skip-browser-warning')) h.set('ngrok-skip-browser-warning', 'true');$nl		return new Request(req, { headers: h });$nl	};$nl$nl	self.addEventListener('fetch', (event) => {$nl		const { request } = event;$nl		const validRequest = validateRequest(request);$nl		if (!validRequest) {$nl			try {$nl				const url = new URL(request.url);$nl				if (/(?:\.ngrok-free\.(?:dev|app)|\.ngrok\.app|\.ngrok\.io)`$/i.test(url.hostname)) {$nl					event.respondWith(fetch(rcInjectNgrokHeader(request)));$nl				}$nl			} catch (e) { /* fall through */ }$nl			return;$nl		}$nl$nl		const responsePromise = getResponse(request);$nl		event.respondWith(responsePromise);$nl	});
+"@
+            Backup-File $swSrc
+            $swContent = [regex]::Replace($swContent, $pat, $repl)
+            Set-Content -Path $swSrc -Value $swContent -NoNewline -Encoding UTF8
+            Write-Host "  patched fetch listener (strengthened ngrok bypass)"
+        }
+    }
+    # Patch 1: monkey-patch self.fetch (kept for inner-SW fetches)
+    if (-not $swContent.Contains('__rcOrigFetch')) {
         Write-Host ""
         Write-Host "== service-worker: ngrok-skip-browser-warning injector =="
         $swMarker = 'const runServiceWorker = (self) => {'
