@@ -866,6 +866,33 @@ if ((Test-Path $patcher) -and (Test-Path $serverDll)) {
     }
 }
 
+# ---------------------------------------------------------------- 6f. Log junctions under C:\Share\logs
+# Surface every Aras / ngrok / IIS log directory under C:\Share\logs so the SMB
+# share gives a single rooted view. Operators (and remote tooling) can then read
+# Aras, ngrok and IIS logs over the share without WinRM / RDP.
+$logsBase = 'C:\Share\logs'
+if (-not (Test-Path $logsBase)) {
+    New-Item -ItemType Directory -Path $logsBase -Force | Out-Null
+}
+$logTargets = @{
+    'client'      = "$InnovatorRoot\Innovator\Client\logs"
+    'server'      = "$InnovatorRoot\Innovator\Server\logs"
+    'oauthserver' = "$InnovatorRoot\OAuthServer\logs"
+    'vault'       = "$InnovatorRoot\Vault\logs"
+    'ngrok'       = 'C:\Tools\ngrok\logs'
+    'iis'         = 'C:\inetpub\logs\LogFiles'
+}
+foreach ($name in $logTargets.Keys) {
+    $linkPath = Join-Path $logsBase $name
+    $target   = $logTargets[$name]
+    if (-not (Test-Path $target)) { continue }
+    if (Test-Path $linkPath) {
+        $existing = Get-Item $linkPath -Force -ErrorAction SilentlyContinue
+        if ($existing -and ($existing.Attributes -band [IO.FileAttributes]::ReparsePoint)) { continue }
+    }
+    cmd /c mklink /J "$linkPath" "$target" 2>&1 | Out-Null
+}
+
 # ---------------------------------------------------------------- 7. IIS ACLs
 Write-Host ""
 Write-Host "== IIS_IUSRS modify ACL =="
