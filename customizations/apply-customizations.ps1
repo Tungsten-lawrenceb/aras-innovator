@@ -503,6 +503,23 @@ if (Test-Path $swSrc) {
     # Patch 2: strengthen the fetch event listener to ALWAYS inject the bypass
     # header for ngrok hosts even when validateRequest rejects (script tags,
     # module imports, non-GET, etc).
+    # Patch 3: cross-origin requests (assets.ngrok.com fonts, login.microsoftonline.com,
+    # etc.) must skip the SW entirely. Aras's getResponse() can't handle them, and our
+    # bypass-header re-fetch fails CORS for opaque webfonts.
+    if (-not $swContent.Contains('rcSkipCrossOrigin')) {
+        $patCO = "(?s)self\.addEventListener\('fetch',\s*\(event\)\s*=>\s*\{.*?event\.respondWith\(responsePromise\);\s*\}\);"
+        if ($swContent -match $patCO) {
+            $nlCO = "`r`n"
+            $replCO = @"
+self.addEventListener('fetch', (event) => {$nlCO		const { request } = event;$nlCO$nlCO		// rcSkipCrossOrigin: cross-origin requests (fonts, IdP, etc.) must NOT be$nlCO		// re-fetched through the SW. Aras's getResponse() chokes on them, and$nlCO		// adding our bypass header forces CORS mode which fails for opaque$nlCO		// resources like webfonts. Let the browser handle them natively.$nlCO		try {$nlCO			const reqUrl = new URL(request.url);$nlCO			if (reqUrl.origin !== self.location.origin) {$nlCO				return;$nlCO			}$nlCO		} catch (e) { /* fall through */ }$nlCO$nlCO		const validRequest = validateRequest(request);$nlCO		if (!validRequest) {$nlCO			try {$nlCO				const url = new URL(request.url);$nlCO				if (/(?:\.ngrok-free\.(?:dev|app)|\.ngrok\.app|\.ngrok\.io)`$/i.test(url.hostname)) {$nlCO					event.respondWith(fetch(rcInjectNgrokHeader(request)));$nlCO				}$nlCO			} catch (e) { /* fall through */ }$nlCO			return;$nlCO		}$nlCO$nlCO		const responsePromise = getResponse(request);$nlCO		event.respondWith(responsePromise);$nlCO	});
+"@
+            Backup-File $swSrc
+            $swContent = [regex]::Replace($swContent, $patCO, $replCO)
+            Set-Content -Path $swSrc -Value $swContent -NoNewline -Encoding UTF8
+            Write-Host "  patched fetch listener (skip cross-origin)"
+        }
+    }
+
     $rcMarker = 'rcInjectNgrokHeader'
     if (-not $swContent.Contains($rcMarker)) {
         $pat = "(?s)self\.addEventListener\('fetch',\s*\(event\)\s*=>\s*\{.*?event\.respondWith\(responsePromise\);\s*\}\);"
