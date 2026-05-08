@@ -1092,6 +1092,32 @@ foreach ($name in $logTargets.Keys) {
     cmd /c mklink /J "$linkPath" "$target" 2>&1 | Out-Null
 }
 
+# ---------------------------------------------------------------- 6g. Keep Aras pools warm
+# IIS ships with processModel.idleTimeout = 20 minutes / idleTimeoutAction = Terminate.
+# After 20 minutes with no traffic the worker process is killed; the next request
+# triggers a cold start (5-15s of 503 / slow response while .NET re-loads, JITs the
+# patched DLLs, re-reads InnovatorClient.config, etc). This shows up as transient
+# "site is down" / "Unexpected token" errors in user testing.
+# Fix: never idle-time-out, start workers immediately when the pool starts (not lazy
+# on first request), and preload each Aras application so its startup runs before
+# the first user request lands.
+Import-Module WebAdministration -ErrorAction SilentlyContinue
+$arasPools = @(
+    'Aras Innovator AppPool ASP.NET Core',
+    'Aras OAuth AppPool ASP.NET Core',
+    'Aras Vault AppPool ASP.NET Core'
+)
+foreach ($p in $arasPools) {
+    if (-not (Get-IISAppPool -Name $p -ErrorAction SilentlyContinue)) { continue }
+    Set-ItemProperty -Path "IIS:\AppPools\$p" -Name processModel.idleTimeout -Value '00:00:00' -ErrorAction SilentlyContinue
+    Set-ItemProperty -Path "IIS:\AppPools\$p" -Name startMode -Value 'AlwaysRunning' -ErrorAction SilentlyContinue
+}
+Get-WebApplication -Site 'Default Web Site' -ErrorAction SilentlyContinue |
+    Where-Object { $_.ApplicationPool -match 'Aras' } |
+    ForEach-Object {
+        try { Set-ItemProperty -Path "IIS:\Sites\Default Web Site$($_.Path)" -Name preloadEnabled -Value $true -ErrorAction Stop } catch { }
+    }
+
 # ---------------------------------------------------------------- 7. IIS ACLs
 Write-Host ""
 Write-Host "== IIS_IUSRS modify ACL =="
